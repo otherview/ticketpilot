@@ -86,7 +86,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	gh := ticketpilot.NewGitHubClient(cfg)
+	gh := ticketpilot.NewGitHubClient(cfg, newLogger())
 	tp := ticketpilot.New(gh, st, cfg, newLogger())
 
 	result, err := tp.Scan(cmd.Context())
@@ -159,7 +159,7 @@ func runReply(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reply body is required: use --body or pipe via stdin")
 	}
 
-	gh := ticketpilot.NewGitHubClient(cfg)
+	gh := ticketpilot.NewGitHubClient(cfg, newLogger())
 	tp := ticketpilot.New(gh, st, cfg, newLogger())
 
 	result, err := tp.Reply(cmd.Context(), replyTicketID, replyCommentID, replySessionID, body)
