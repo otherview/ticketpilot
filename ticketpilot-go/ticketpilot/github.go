@@ -3,6 +3,7 @@ package ticketpilot
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -18,16 +19,18 @@ type gitHubClient struct {
 	owner         string
 	ownerType     string
 	projectNumber int
+	log           *slog.Logger
 }
 
 // NewGitHubClient creates a GitHubClient from config.
-func NewGitHubClient(cfg *Config) GitHubClient {
+func NewGitHubClient(cfg *Config, logger *slog.Logger) GitHubClient {
 	return &gitHubClient{
 		gh:            gh.NewClient(nil).WithAuthToken(cfg.GitHubPAT),
 		handle:        strings.ToLower(strings.TrimPrefix(cfg.GitHubHandle, "@")),
 		owner:         cfg.projectOwner,
 		ownerType:     cfg.projectOwnerType,
 		projectNumber: cfg.projectNumber,
+		log:           logger,
 	}
 }
 
@@ -45,34 +48,47 @@ func (c *gitHubClient) GetNextMention(
 		return nil, fmt.Errorf("listing project items: %w", err)
 	}
 
+	c.log.Debug("project items fetched", "count", len(items))
+
 	for _, item := range items {
 		ct := item.GetContentType()
 		if ct == nil {
+			c.log.Debug("skipping item: no content type")
 			continue
 		}
 		if *ct != gh.ProjectV2ItemContentTypeIssue && *ct != gh.ProjectV2ItemContentTypePullRequest {
+			c.log.Debug("skipping item: not issue or PR", "type", string(*ct))
 			continue // skip DraftIssues — no comments to reply to
 		}
 
 		repoOwner, repoName, issueNum, title, _, err := extractContent(item)
 		if err != nil {
+			c.log.Debug("skipping item: could not extract content", "err", err)
 			continue // skip unparseable items, don't block the rest
 		}
 
+		c.log.Debug("scanning item", "title", title, "repo", repoOwner+"/"+repoName, "issue", issueNum)
+
 		comments, err := c.listCommentsSince(ctx, repoOwner, repoName, issueNum, since)
 		if err != nil {
+			c.log.Debug("skipping item: could not list comments", "err", err)
 			continue
 		}
+
+		c.log.Debug("comments fetched", "count", len(comments), "since", since)
 
 		// Prepend the issue/PR body as the first thread entry so the AI sees
 		// the original ticket description as part of the conversation.
 		thread := prependBody(item, comments)
 
-		for _, comment := range comments {
-			if isProcessed(comment.ID) {
+		// thread[0] is the issue/PR body (if non-empty); check it for a mention too.
+		for _, entry := range thread {
+			if isProcessed(entry.ID) {
+				c.log.Debug("skipping thread entry: already processed", "id", entry.ID)
 				continue
 			}
-			if !strings.Contains(strings.ToLower(comment.Body), "@"+c.handle) {
+			if !strings.Contains(strings.ToLower(entry.Body), "@"+c.handle) {
+				c.log.Debug("skipping thread entry: no mention", "id", entry.ID, "author", entry.Author)
 				continue
 			}
 
@@ -85,14 +101,14 @@ func (c *gitHubClient) GetNextMention(
 
 			return &Mention{
 				TicketID:      ticketID,
-				CommentID:     comment.ID,
+				CommentID:     entry.ID,
 				Title:         title,
 				Type:          string(*ct),
 				RepoOwner:     repoOwner,
 				RepoName:      repoName,
 				IssueNumber:   issueNum,
-				CommentAuthor: comment.Author,
-				CommentBody:   comment.Body,
+				CommentAuthor: entry.Author,
+				CommentBody:   entry.Body,
 				Thread:        thread,
 				SessionID:     sessionID,
 			}, nil

@@ -52,7 +52,7 @@ func LoadConfig(envFile string) (*Config, error) {
 	}
 
 	if cfg.StateFile == "" {
-		cfg.StateFile = filepath.Join(home, ".ticketpilot", "state.json")
+		cfg.StateFile = "state.json"
 	}
 	cfg.StateFile = expandHome(cfg.StateFile, home)
 
