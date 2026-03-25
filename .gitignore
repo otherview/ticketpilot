@@ -1,0 +1,12 @@
+.env
+.venv/
+state.json
+*.tmp
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+bin/
+.claude/
+.idea/
