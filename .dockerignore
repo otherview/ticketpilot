@@ -1,0 +1,7 @@
+bin/
+state.json
+.env
+python/
+.git/
+*.md
+!agents.md

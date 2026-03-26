@@ -18,14 +18,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
+TP_ENV_OPT=""
+[ -f "$ENV_FILE" ] && TP_ENV_OPT="--env-file $ENV_FILE"
 AGENTS_FILE="${AGENTS_FILE:-$PROJECT_DIR/agents.md}"
 
 if [ -n "${TICKETPILOT_BIN:-}" ]; then
   TP="$TICKETPILOT_BIN"
 elif [ -x "$PROJECT_DIR/bin/ticketpilot" ]; then
   TP="$PROJECT_DIR/bin/ticketpilot"
+elif command -v ticketpilot &>/dev/null; then
+  TP="ticketpilot"
 else
-  echo "ERROR: bin/ticketpilot not found. Run: make build" >&2
+  echo "ERROR: ticketpilot not found. Run: make build" >&2
   exit 1
 fi
 
@@ -45,7 +49,7 @@ fi
 # ---------------------------------------------------------------------------
 
 log "Scanning for pending mentions..."
-SCAN=$($TP scan -v --env-file "$ENV_FILE")
+SCAN=$($TP scan -v $TP_ENV_OPT)
 PENDING=$(echo "$SCAN" | jq -r '.pending')
 
 if [ "$PENDING" = "false" ]; then
@@ -96,8 +100,8 @@ fi
 # ---------------------------------------------------------------------------
 
 log "Posting reply (session: $NEW_SESSION_ID)..."
-$TP reply -v \
-  --env-file "$ENV_FILE" \
+# shellcheck disable=SC2086
+$TP reply -v $TP_ENV_OPT \
   --ticket-id "$TICKET_ID" \
   --comment-id "$COMMENT_ID" \
   --session-id "$NEW_SESSION_ID" \

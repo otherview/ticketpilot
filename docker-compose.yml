@@ -1,0 +1,17 @@
+name: ticketpilot
+
+services:
+  ticketpilot:
+    build: .
+    env_file: .env
+    volumes:
+      - ticketpilot-data:/data         # persists state.json and OAuth token across restarts
+    restart: unless-stopped
+
+# First-time setup (run once, or to refresh the token):
+#   docker compose run --rm -it ticketpilot on-board-claude
+# Then start the loop:
+#   docker compose up -d
+
+volumes:
+  ticketpilot-data:

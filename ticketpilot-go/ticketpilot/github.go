@@ -61,6 +61,18 @@ func (c *gitHubClient) GetNextMention(
 			continue // skip DraftIssues — no comments to reply to
 		}
 
+		// Skip closed issues and closed/merged PRs.
+		if content := item.GetContent(); content != nil {
+			if content.Issue != nil && content.Issue.GetState() == "closed" {
+				c.log.Debug("skipping item: issue is closed", "title", content.Issue.GetTitle())
+				continue
+			}
+			if content.PullRequest != nil && content.PullRequest.GetState() == "closed" {
+				c.log.Debug("skipping item: PR is closed/merged", "title", content.PullRequest.GetTitle())
+				continue
+			}
+		}
+
 		repoOwner, repoName, issueNum, title, _, err := extractContent(item)
 		if err != nil {
 			c.log.Debug("skipping item: could not extract content", "err", err)
