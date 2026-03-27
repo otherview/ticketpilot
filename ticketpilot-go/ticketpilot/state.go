@@ -10,28 +10,25 @@ import (
 
 // TicketInfo holds the persisted data for a single project ticket.
 type TicketInfo struct {
-	RepoOwner              string `json:"repo_owner"`
-	RepoName               string `json:"repo_name"`
-	IssueNumber            int    `json:"issue_number"`
-	SessionID              string `json:"session_id,omitempty"`
-	LastProcessedCommentID string `json:"last_processed_comment_id,omitempty"`
+	RepoOwner     string     `json:"repo_owner"`
+	RepoName      string     `json:"repo_name"`
+	IssueNumber   int        `json:"issue_number"`
+	SessionID     string     `json:"session_id,omitempty"`
+	LastRepliedAt *time.Time `json:"last_replied_at,omitempty"`
 }
 
 type state struct {
-	ProcessedComments []string              `json:"processed_comments"`
-	Tickets           map[string]TicketInfo `json:"tickets"`
-	LastRunAt         *time.Time            `json:"last_run_at,omitempty"`
+	StartedAtTime *time.Time            `json:"started_at,omitempty"`
+	Tickets       map[string]TicketInfo `json:"tickets"`
 
-	path      string
-	processed map[string]struct{} // fast O(1) lookup
+	path string
 }
 
 // LoadState reads or creates state from the given path.
 func LoadState(path string) (StateStore, error) {
 	s := &state{
-		path:      path,
-		Tickets:   make(map[string]TicketInfo),
-		processed: make(map[string]struct{}),
+		path:    path,
+		Tickets: make(map[string]TicketInfo),
 	}
 
 	data, err := os.ReadFile(path)
@@ -46,9 +43,6 @@ func LoadState(path string) (StateStore, error) {
 		return nil, fmt.Errorf("parsing state: %w", err)
 	}
 
-	for _, id := range s.ProcessedComments {
-		s.processed[id] = struct{}{}
-	}
 	if s.Tickets == nil {
 		s.Tickets = make(map[string]TicketInfo)
 	}
@@ -56,16 +50,11 @@ func LoadState(path string) (StateStore, error) {
 	return s, nil
 }
 
-func (s *state) IsProcessed(commentID string) bool {
-	_, ok := s.processed[commentID]
-	return ok
-}
+func (s *state) StartedAt() *time.Time { return s.StartedAtTime }
 
-func (s *state) MarkProcessed(commentID string) {
-	if _, ok := s.processed[commentID]; !ok {
-		s.processed[commentID] = struct{}{}
-		s.ProcessedComments = append(s.ProcessedComments, commentID)
-	}
+func (s *state) SetStartedAt(t time.Time) {
+	t2 := t
+	s.StartedAtTime = &t2
 }
 
 func (s *state) SessionFor(ticketID string) string {
@@ -78,14 +67,15 @@ func (s *state) SetSession(ticketID, sessionID string) {
 	s.Tickets[ticketID] = t
 }
 
-func (s *state) LastProcessedComment(ticketID string) string {
-	return s.Tickets[ticketID].LastProcessedCommentID
+func (s *state) LastRepliedAt(ticketID string) *time.Time {
+	return s.Tickets[ticketID].LastRepliedAt
 }
 
-func (s *state) SetLastProcessedComment(ticketID, commentID string) {
-	t := s.Tickets[ticketID]
-	t.LastProcessedCommentID = commentID
-	s.Tickets[ticketID] = t
+func (s *state) SetLastRepliedAt(ticketID string, t time.Time) {
+	ti := s.Tickets[ticketID]
+	t2 := t
+	ti.LastRepliedAt = &t2
+	s.Tickets[ticketID] = ti
 }
 
 func (s *state) RecordTicket(ticketID, repoOwner, repoName string, issueNumber int) {
@@ -102,14 +92,6 @@ func (s *state) TicketLocation(ticketID string) (repoOwner, repoName string, iss
 		return "", "", 0, false
 	}
 	return t.RepoOwner, t.RepoName, t.IssueNumber, true
-}
-
-func (s *state) GetLastRunAt() *time.Time {
-	return s.LastRunAt
-}
-
-func (s *state) SetLastRunAt(t time.Time) {
-	s.LastRunAt = &t
 }
 
 // Save writes state atomically: write to .tmp then rename, so a crash

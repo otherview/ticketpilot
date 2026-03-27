@@ -30,25 +30,31 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Bypass the interactive onboarding wizard (safe to bake in — not sensitive)
-RUN echo '{"hasCompletedOnboarding":true}' > /root/.claude.json
+# Bypass the interactive onboarding wizard (safe to bake in — not sensitive).
+# Written to the volume-backed config dir at runtime by the entrypoint.
+# (Cannot bake into /data at build time — it's a volume mount point.)
 
 # Go toolchain — copied from builder so the bot can run go commands
 COPY --from=builder /usr/local/go /usr/local/go
 ENV PATH=$PATH:/usr/local/go/bin
 
+# Non-root user — --dangerously-skip-permissions is blocked for root by Claude Code
+RUN useradd -m -s /bin/bash -u 1000 bot
+
 # App
 WORKDIR /app
-COPY --from=builder /build/bin/ticketpilot bin/ticketpilot
-COPY scripts/ scripts/
-COPY agents.md .
+COPY --from=builder --chown=bot:bot /build/bin/ticketpilot bin/ticketpilot
+COPY --chown=bot:bot scripts/ scripts/
+COPY --chown=bot:bot agents.md .
 RUN chmod +x scripts/*.sh
 
-# State lives in a dedicated directory so it can be mounted as a named volume
-RUN mkdir -p /data
+# State and Claude session data live in /data so they survive container rebuilds
+RUN mkdir -p /data && chown bot:bot /data
 ENV TICKETPILOT_STATE_FILE=/data/state.json
+ENV CLAUDE_CONFIG_DIR=/data/.claude
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chown=bot:bot docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+USER bot
 ENTRYPOINT ["docker-entrypoint.sh"]

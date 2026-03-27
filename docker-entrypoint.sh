@@ -40,6 +40,13 @@ fi
 export CLAUDE_CODE_OAUTH_TOKEN
 CLAUDE_CODE_OAUTH_TOKEN=$(< "$TOKEN_FILE")
 
+# Ensure the onboarding marker exists in the volume-backed config dir.
+mkdir -p "${CLAUDE_CONFIG_DIR}"
+if [ ! -f "${CLAUDE_CONFIG_DIR}/ONBOARDING_DONE" ]; then
+  echo '{"hasCompletedOnboarding":true}' > "${CLAUDE_CONFIG_DIR}/.claude.json"
+  touch "${CLAUDE_CONFIG_DIR}/ONBOARDING_DONE"
+fi
+
 # Authenticate gh CLI using the GitHub PAT
 export GH_TOKEN="${TICKETPILOT_GITHUB_PAT}"
 

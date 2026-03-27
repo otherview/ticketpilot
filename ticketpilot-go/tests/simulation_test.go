@@ -3,15 +3,26 @@ package tests
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/otherview/ticketpilot/ticketpilot"
 )
 
-var testCfg = &ticketpilot.Config{LookbackDays: 30}
+var testCfg = &ticketpilot.Config{}
 
-// newMention is a test helper that builds a Mention with sensible defaults.
+// anchor is used as the startedAt time in tests. Comments must have
+// CreatedAt after anchor to be visible to the scanner.
+var anchor = time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+// at returns a time N seconds after anchor.
+func at(offsetSeconds int) time.Time {
+	return anchor.Add(time.Duration(offsetSeconds) * time.Second)
+}
+
+// newMention builds a Mention. The single-entry thread uses at(1) as CreatedAt
+// so it falls after the default anchor startedAt.
 func newMention(ticketID, commentID, repoOwner, repoName string, issueNumber int) *ticketpilot.Mention {
-	return &ticketpilot.Mention{
+	m := &ticketpilot.Mention{
 		TicketID:      ticketID,
 		CommentID:     commentID,
 		Title:         "Fix the thing",
@@ -22,12 +33,50 @@ func newMention(ticketID, commentID, repoOwner, repoName string, issueNumber int
 		CommentAuthor: "alice",
 		CommentBody:   "@bot please help",
 	}
+	m.Thread = []ticketpilot.Comment{
+		{ID: commentID, Author: m.CommentAuthor, Body: m.CommentBody, CreatedAt: at(1)},
+	}
+	return m
 }
 
-// TestScan_NoPending: no mentions in the project → pending=false, LastRunAt updated.
-func TestScan_NoPending(t *testing.T) {
-	gh := &FakeGitHubClient{}
+// newFakeGH builds a FakeGitHubClient with handle "bot".
+func newFakeGH(mentions ...*ticketpilot.Mention) *FakeGitHubClient {
+	return &FakeGitHubClient{Handle: "bot", Mentions: mentions}
+}
+
+// newFakeStateWithAnchor returns a FakeStateStore with startedAt = anchor,
+// ready for non-first-run tests.
+func newFakeStateWithAnchor() *FakeStateStore {
 	st := newFakeState()
+	st.SetStartedAt(anchor)
+	return st
+}
+
+// TestScan_FirstRun: startedAt is nil → scan initialises it and returns pending=false.
+func TestScan_FirstRun(t *testing.T) {
+	gh := newFakeGH()
+	st := newFakeState() // startedAt is nil
+
+	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Pending {
+		t.Error("expected Pending=false on first run")
+	}
+	if st.StartedAt() == nil {
+		t.Error("expected startedAt to be set after first run")
+	}
+	if st.SaveCalls != 1 {
+		t.Errorf("expected 1 Save call, got %d", st.SaveCalls)
+	}
+}
+
+// TestScan_NoPending: startedAt set, no mentions → pending=false, state saved.
+func TestScan_NoPending(t *testing.T) {
+	gh := newFakeGH()
+	st := newFakeStateWithAnchor()
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -36,9 +85,6 @@ func TestScan_NoPending(t *testing.T) {
 	}
 	if result.Pending {
 		t.Error("expected Pending=false")
-	}
-	if st.lastRunAt == nil {
-		t.Error("expected LastRunAt to be set after a clean scan")
 	}
 	if st.SaveCalls != 1 {
 		t.Errorf("expected 1 Save call, got %d", st.SaveCalls)
@@ -49,8 +95,8 @@ func TestScan_NoPending(t *testing.T) {
 // ticket location recorded in state.
 func TestScan_MentionFound(t *testing.T) {
 	m := newMention("owner/repo#1", "c1", "owner", "repo", 1)
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 	if err != nil {
@@ -78,13 +124,15 @@ func TestScan_MentionFound(t *testing.T) {
 	}
 }
 
-// TestScan_SkipsProcessedComment: the only mention is already processed →
-// scan returns pending=false.
-func TestScan_SkipsProcessedComment(t *testing.T) {
+// TestScan_BotAlreadyReplied: lastRepliedAt is set after the mention →
+// no comments after cutoff → scan returns pending=false.
+func TestScan_BotAlreadyReplied(t *testing.T) {
 	m := newMention("owner/repo#1", "c1", "owner", "repo", 1)
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
-	st.MarkProcessed("c1")
+	// mention at at(1), reply recorded at at(2) — cutoff is at(2), mention is before cutoff
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
+	replyTime := at(2)
+	st.lastReplied["owner/repo#1"] = &replyTime
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -92,18 +140,20 @@ func TestScan_SkipsProcessedComment(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Pending {
-		t.Error("expected Pending=false — processed comment must be skipped")
+		t.Error("expected Pending=false — comment predates lastRepliedAt cutoff")
 	}
 }
 
-// TestScan_ReturnsFirstUnprocessed: two mentions; first is processed →
-// scan returns the second one.
-func TestScan_ReturnsFirstUnprocessed(t *testing.T) {
+// TestScan_SkipsHandledTicket_ReturnsOther: first ticket's mention is before
+// its lastRepliedAt, second ticket has an unhandled mention → scan returns second.
+func TestScan_SkipsHandledTicket_ReturnsOther(t *testing.T) {
 	m1 := newMention("owner/repo#1", "c1", "owner", "repo", 1)
-	m2 := newMention("owner/repo#2", "c2", "owner", "repo", 2)
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m1, m2}}
-	st := newFakeState()
-	st.MarkProcessed("c1")
+	// m1's comment is at at(1); set lastRepliedAt to at(2) so it's filtered
+	m2 := newMention("owner/repo#2", "c3", "owner", "repo", 2)
+	gh := newFakeGH(m1, m2)
+	st := newFakeStateWithAnchor()
+	replyTime := at(2)
+	st.lastReplied["owner/repo#1"] = &replyTime
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -113,21 +163,22 @@ func TestScan_ReturnsFirstUnprocessed(t *testing.T) {
 	if !result.Pending {
 		t.Fatal("expected Pending=true")
 	}
-	if result.Mention.CommentID != "c2" {
-		t.Errorf("expected comment c2, got %s", result.Mention.CommentID)
+	if result.Mention.TicketID != "owner/repo#2" {
+		t.Errorf("expected ticket owner/repo#2, got %s", result.Mention.TicketID)
 	}
 }
 
-// TestScan_NoSession_IncludesThread: no prior session → full thread is included
-// so the caller has context to start a new conversation.
-func TestScan_NoSession_IncludesThread(t *testing.T) {
+// TestScan_NoSession_IncludesFullThread: no prior session → full thread up to
+// and including the mention is returned (no post-mention comments).
+func TestScan_NoSession_IncludesFullThread(t *testing.T) {
 	m := newMention("owner/repo#1", "c1", "owner", "repo", 1)
 	m.Thread = []ticketpilot.Comment{
-		{ID: "c0", Author: "bob", Body: "first comment"},
-		{ID: "c1", Author: "alice", Body: "@bot please help"},
+		{ID: "c0", Author: "bob", Body: "first comment", CreatedAt: at(1)},
+		{ID: "c1", Author: "alice", Body: "@bot please help", CreatedAt: at(2)},
+		{ID: "c2", Author: "carol", Body: "post-mention noise", CreatedAt: at(3)},
 	}
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -140,26 +191,35 @@ func TestScan_NoSession_IncludesThread(t *testing.T) {
 	if result.Mention.SessionID != nil {
 		t.Error("expected SessionID=nil for a new ticket")
 	}
+	// thread: c0 and c1 only — c2 is post-mention and excluded
 	if len(result.Mention.Thread) != 2 {
-		t.Errorf("expected full thread (2 comments) when no session, got %d", len(result.Mention.Thread))
+		t.Errorf("expected 2 comments (up to mention), got %d", len(result.Mention.Thread))
+	}
+	if result.Mention.Thread[0].ID != "c0" {
+		t.Errorf("expected thread[0]=c0, got %s", result.Mention.Thread[0].ID)
+	}
+	if result.Mention.Thread[1].ID != "c1" {
+		t.Errorf("expected thread[1]=c1 (the mention), got %s", result.Mention.Thread[1].ID)
 	}
 }
 
 // TestScan_ExistingSession_DeltaThread: session exists → only comments after
-// the last processed comment are returned (the delta).
+// lastRepliedAt cutoff are returned, up to and including the new mention.
 func TestScan_ExistingSession_DeltaThread(t *testing.T) {
 	m := newMention("owner/repo#1", "c3", "owner", "repo", 1)
+	// lastRepliedAt = at(2), so cutoff = at(2)
+	// c0..c2 are before cutoff; c2b and c3 are after cutoff
 	m.Thread = []ticketpilot.Comment{
-		{ID: "c0", Author: "alice", Body: "first comment"},
-		{ID: "c1", Author: "alice", Body: "@bot first ask"},   // bot replied to this
-		{ID: "c2", Author: "bot", Body: "bot reply"},
-		{ID: "c2b", Author: "bob", Body: "something else"},   // delta starts here
-		{ID: "c3", Author: "carol", Body: "@bot second ask"}, // the new mention
+		{ID: "c0", Author: "alice", Body: "first comment", CreatedAt: at(1)},
+		{ID: "c2b", Author: "bob", Body: "something", CreatedAt: at(3)},
+		{ID: "c3", Author: "carol", Body: "@bot second ask", CreatedAt: at(4)},
+		{ID: "c4", Author: "dave", Body: "post-mention noise", CreatedAt: at(5)},
 	}
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
 	st.SetSession("owner/repo#1", "session-abc")
-	st.SetLastProcessedComment("owner/repo#1", "c1") // bot last replied to c1
+	replyTime := at(2)
+	st.lastReplied["owner/repo#1"] = &replyTime
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -172,27 +232,29 @@ func TestScan_ExistingSession_DeltaThread(t *testing.T) {
 	if result.Mention.SessionID == nil || *result.Mention.SessionID != "session-abc" {
 		t.Fatalf("expected session-abc, got %v", result.Mention.SessionID)
 	}
-	// delta: only c2, c2b, c3 (everything after c1)
-	if len(result.Mention.Thread) != 3 {
-		t.Errorf("expected 3 delta comments, got %d", len(result.Mention.Thread))
+	// delta: c2b and c3 (c4 is post-mention, excluded)
+	if len(result.Mention.Thread) != 2 {
+		t.Errorf("expected 2 delta comments, got %d", len(result.Mention.Thread))
 	}
-	if result.Mention.Thread[0].ID != "c2" {
-		t.Errorf("expected delta to start at c2, got %s", result.Mention.Thread[0].ID)
+	if result.Mention.Thread[0].ID != "c2b" {
+		t.Errorf("expected delta to start at c2b, got %s", result.Mention.Thread[0].ID)
+	}
+	if result.Mention.Thread[1].ID != "c3" {
+		t.Errorf("expected delta to end at c3 (the mention), got %s", result.Mention.Thread[1].ID)
 	}
 }
 
-// TestScan_ExistingSession_AnchorNotInWindow: anchor is outside the lookback
-// window → thread is empty (session has the context).
-func TestScan_ExistingSession_AnchorNotInWindow(t *testing.T) {
-	m := newMention("owner/repo#1", "c5", "owner", "repo", 1)
+// TestScan_MultipleStackedMentions_LastOnly: multiple @mentions after cutoff →
+// only the most recent one triggers a reply.
+func TestScan_MultipleStackedMentions_LastOnly(t *testing.T) {
+	m := newMention("owner/repo#1", "c3", "owner", "repo", 1)
 	m.Thread = []ticketpilot.Comment{
-		{ID: "c4", Author: "bob", Body: "new comment"},
-		{ID: "c5", Author: "carol", Body: "@bot help"},
+		{ID: "c1", Author: "alice", Body: "@bot first ask", CreatedAt: at(1)},
+		{ID: "c2", Author: "bob", Body: "noise", CreatedAt: at(2)},
+		{ID: "c3", Author: "carol", Body: "@bot second ask", CreatedAt: at(3)},
 	}
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
-	st.SetSession("owner/repo#1", "session-abc")
-	st.SetLastProcessedComment("owner/repo#1", "c1") // c1 not in thread (outside window)
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Scan(context.Background())
 
@@ -202,16 +264,17 @@ func TestScan_ExistingSession_AnchorNotInWindow(t *testing.T) {
 	if !result.Pending {
 		t.Fatal("expected Pending=true")
 	}
-	if len(result.Mention.Thread) != 0 {
-		t.Errorf("expected empty thread when anchor outside window, got %d comments", len(result.Mention.Thread))
+	// Must return c3 (most recent mention), not c1
+	if result.Mention.CommentID != "c3" {
+		t.Errorf("expected CommentID=c3 (last mention), got %s", result.Mention.CommentID)
 	}
 }
 
-// TestReply_Success: ticket recorded in state → comment posted, comment marked
-// processed, session stored.
+// TestReply_Success: ticket recorded in state → comment posted, session and
+// lastRepliedAt stored.
 func TestReply_Success(t *testing.T) {
-	gh := &FakeGitHubClient{}
-	st := newFakeState()
+	gh := newFakeGH()
+	st := newFakeStateWithAnchor()
 	st.RecordTicket("owner/repo#1", "owner", "repo", 1)
 
 	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Reply(
@@ -235,12 +298,13 @@ func TestReply_Success(t *testing.T) {
 	if p.Body != "Here is my reply" {
 		t.Errorf("unexpected body: %q", p.Body)
 	}
-	// state updated
-	if !st.IsProcessed("c1") {
-		t.Error("expected c1 to be marked processed")
-	}
+	// session stored
 	if st.SessionFor("owner/repo#1") != "session-xyz" {
 		t.Error("expected session to be stored")
+	}
+	// lastRepliedAt stored
+	if st.LastRepliedAt("owner/repo#1") == nil {
+		t.Error("expected lastRepliedAt to be set after reply")
 	}
 	if st.SaveCalls != 1 {
 		t.Errorf("expected 1 Save call, got %d", st.SaveCalls)
@@ -249,8 +313,8 @@ func TestReply_Success(t *testing.T) {
 
 // TestReply_UnknownTicket: ticket was never scanned → Reply returns an error.
 func TestReply_UnknownTicket(t *testing.T) {
-	gh := &FakeGitHubClient{}
-	st := newFakeState()
+	gh := newFakeGH()
+	st := newFakeStateWithAnchor()
 
 	_, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Reply(
 		context.Background(), "owner/repo#99", "c1", "session-xyz", "reply",
@@ -262,11 +326,11 @@ func TestReply_UnknownTicket(t *testing.T) {
 }
 
 // TestScanReplyFlow: full round-trip — Scan finds a mention, Reply posts a
-// response, a second Scan skips the now-processed comment.
+// response, a second Scan sees the mention is now before lastRepliedAt and skips it.
 func TestScanReplyFlow(t *testing.T) {
 	m := newMention("owner/repo#1", "c1", "owner", "repo", 1)
-	gh := &FakeGitHubClient{Mentions: []*ticketpilot.Mention{m}}
-	st := newFakeState()
+	gh := newFakeGH(m)
+	st := newFakeStateWithAnchor()
 	tp := ticketpilot.New(gh, st, testCfg, newTestLogger(t))
 	ctx := context.Background()
 
@@ -282,18 +346,18 @@ func TestScanReplyFlow(t *testing.T) {
 		t.Fatalf("scan 1: expected comment c1, got %s", scan1.Mention.CommentID)
 	}
 
-	// reply
+	// reply — records lastRepliedAt = now (after the mention's CreatedAt)
 	_, err = tp.Reply(ctx, scan1.Mention.TicketID, scan1.Mention.CommentID, "session-1", "Thanks!")
 	if err != nil {
 		t.Fatalf("reply failed: %v", err)
 	}
 
-	// second scan — comment is now processed, nothing pending
+	// second scan — c1 is before lastRepliedAt cutoff → nothing pending
 	scan2, err := tp.Scan(ctx)
 	if err != nil {
 		t.Fatalf("scan 2 failed: %v", err)
 	}
 	if scan2.Pending {
-		t.Error("scan 2: expected Pending=false — comment was already processed")
+		t.Error("scan 2: expected Pending=false — mention is before lastRepliedAt")
 	}
 }

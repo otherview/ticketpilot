@@ -61,13 +61,39 @@ if [ "$PENDING" = "false" ]; then
   exit 0
 fi
 
-TICKET_ID=$(echo "$SCAN"  | jq -r '.ticket_id')
-COMMENT_ID=$(echo "$SCAN" | jq -r '.comment_id')
-TITLE=$(echo "$SCAN"      | jq -r '.title')
-TYPE=$(echo "$SCAN"       | jq -r '.type')
-SESSION_ID=$(echo "$SCAN" | jq -r '.session_id')
+TICKET_ID=$(echo "$SCAN"    | jq -r '.ticket_id')
+COMMENT_ID=$(echo "$SCAN"   | jq -r '.comment_id')
+TITLE=$(echo "$SCAN"        | jq -r '.title')
+TYPE=$(echo "$SCAN"         | jq -r '.type')
+SESSION_ID=$(echo "$SCAN"   | jq -r '.session_id')
+REPO_OWNER=$(echo "$SCAN"   | jq -r '.repo_owner')
+REPO_NAME=$(echo "$SCAN"    | jq -r '.repo_name')
+ISSUE_NUMBER=$(echo "$SCAN" | jq -r '.issue_number')
 
 log "Pending mention on $TYPE: $TITLE (ticket: $TICKET_ID)"
+
+# ---------------------------------------------------------------------------
+# Prepare repository
+# ---------------------------------------------------------------------------
+
+export REPO_DIR REPO_OWNER REPO_NAME ISSUE_NUMBER
+export BOT_HANDLE="${TICKETPILOT_GITHUB_HANDLE:-}"
+
+if [ -n "$REPO_OWNER" ] && [ "$REPO_OWNER" != "null" ] && \
+   [ -n "$REPO_NAME"  ] && [ "$REPO_NAME"  != "null" ]; then
+  REPO_DIR="/data/repos/${REPO_OWNER}/${REPO_NAME}"
+  if [ -d "$REPO_DIR/.git" ]; then
+    log "Fetching latest refs for ${REPO_OWNER}/${REPO_NAME}..."
+    git -C "$REPO_DIR" fetch --all --quiet
+  else
+    log "Cloning ${REPO_OWNER}/${REPO_NAME}..."
+    mkdir -p "$(dirname "$REPO_DIR")"
+    git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}" "$REPO_DIR" --quiet
+  fi
+else
+  REPO_DIR=""
+  log "WARNING: repo info missing from scan output, skipping clone."
+fi
 
 # ---------------------------------------------------------------------------
 # Build prompt
@@ -81,11 +107,23 @@ PROMPT=$(echo "$SCAN" | "$SCRIPT_DIR/prompt.sh")
 
 log "Calling Claude..."
 
+SYSTEM_PROMPT=$(cat "$AGENTS_FILE")
 if [ "$SESSION_ID" = "null" ]; then
-  SYSTEM_PROMPT=$(cat "$AGENTS_FILE")
-  RESPONSE=$(claude -p "$PROMPT" --system-prompt "$SYSTEM_PROMPT" --output-format json --tools "")
+  RESPONSE=$(claude -p "$PROMPT" \
+    --system-prompt "$SYSTEM_PROMPT" \
+    --output-format json \
+    --dangerously-skip-permissions)
 else
-  RESPONSE=$(claude --resume "$SESSION_ID" -p "$PROMPT" --output-format json --tools "")
+  # Attempt to resume; fall back to a fresh conversation if the session is gone.
+  RESPONSE=$(claude --resume "$SESSION_ID" -p "$PROMPT" \
+    --output-format json \
+    --dangerously-skip-permissions 2>/dev/null) || {
+    log "Session $SESSION_ID not found — starting fresh conversation."
+    RESPONSE=$(claude -p "$PROMPT" \
+      --system-prompt "$SYSTEM_PROMPT" \
+      --output-format json \
+      --dangerously-skip-permissions)
+  }
 fi
 
 NEW_SESSION_ID=$(echo "$RESPONSE" | jq -r '.session_id')

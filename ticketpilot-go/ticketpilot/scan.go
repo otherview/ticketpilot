@@ -7,41 +7,40 @@ import (
 	"time"
 )
 
-// commentsAfter returns the slice of comments that follow anchorID in thread.
-// If anchorID is empty, the full thread is returned (no anchor recorded yet).
-// If anchorID is not found, nil is returned (anchor is outside the lookback
-// window; the session already has the context).
-func commentsAfter(thread []Comment, anchorID string) []Comment {
-	if anchorID == "" {
-		return thread
-	}
-	for i, c := range thread {
-		if c.ID == anchorID {
-			return thread[i+1:]
-		}
-	}
-	return nil
-}
-
-// Scan finds the next unprocessed @handle mention in the GitHub Project.
-// Returns a ScanResult with Pending=false when nothing is waiting.
-// When a mention is found, records the ticket location in state and saves.
+// Scan finds the next pending @handle mention in the GitHub Project.
+// On the very first call (started_at not set) it initialises the start anchor
+// and returns Pending=false without scanning — this prevents the bot from
+// replying to historical mentions on startup.
+// Subsequent calls use cutoffFor(ticketID) = max(started_at, last_replied_at)
+// to only look at new activity since the last interaction.
 func (tp *TicketPilot) Scan(ctx context.Context) (*ScanResult, error) {
-	since := time.Now().UTC().AddDate(0, 0, -tp.cfg.LookbackDays)
-	if last := tp.st.GetLastRunAt(); last != nil {
-		since = *last
+	if tp.st.StartedAt() == nil {
+		now := time.Now().UTC()
+		tp.st.SetStartedAt(now)
+		if err := tp.st.Save(); err != nil {
+			return nil, fmt.Errorf("saving state: %w", err)
+		}
+		tp.log.Info("first run: initialized started_at, skipping historical mentions")
+		return &ScanResult{Pending: false}, nil
 	}
 
-	tp.log.Info("scan started", "since", since)
+	cutoffFor := func(ticketID string) time.Time {
+		startedAt := *tp.st.StartedAt()
+		if lr := tp.st.LastRepliedAt(ticketID); lr != nil && lr.After(startedAt) {
+			return *lr
+		}
+		return startedAt
+	}
 
-	mention, err := tp.gh.GetNextMention(ctx, since, tp.st.IsProcessed, tp.st.SessionFor)
+	tp.log.Info("scan started")
+
+	mention, err := tp.gh.GetNextMention(ctx, cutoffFor, tp.st.SessionFor)
 	if err != nil {
 		return nil, fmt.Errorf("getting next mention: %w", err)
 	}
 
 	if mention == nil {
 		tp.log.Info("scan complete", "pending", false)
-		tp.st.SetLastRunAt(time.Now().UTC())
 		if err := tp.st.Save(); err != nil {
 			return nil, fmt.Errorf("saving state: %w", err)
 		}
@@ -59,14 +58,6 @@ func (tp *TicketPilot) Scan(ctx context.Context) (*ScanResult, error) {
 		"has_session", mention.SessionID != nil,
 		slog.Int("thread_length", len(mention.Thread)),
 	)
-
-	// No prior session: keep the full thread so the caller has context to start
-	// a new conversation. With an existing session: return only the delta —
-	// comments that arrived after the last comment the bot replied to.
-	if mention.SessionID != nil {
-		anchorID := tp.st.LastProcessedComment(mention.TicketID)
-		mention.Thread = commentsAfter(mention.Thread, anchorID)
-	}
 
 	tp.st.RecordTicket(mention.TicketID, mention.RepoOwner, mention.RepoName, mention.IssueNumber)
 	if err := tp.st.Save(); err != nil {

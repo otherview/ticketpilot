@@ -3,6 +3,7 @@ package ticketpilot
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Reply posts a reply to the given ticket and marks the comment as processed.
@@ -25,9 +26,8 @@ func (tp *TicketPilot) Reply(ctx context.Context, ticketID, commentID, sessionID
 		return nil, err
 	}
 
-	tp.st.MarkProcessed(commentID)
 	tp.st.SetSession(ticketID, sessionID)
-	tp.st.SetLastProcessedComment(ticketID, commentID)
+	tp.st.SetLastRepliedAt(ticketID, time.Now().UTC())
 	if err := tp.st.Save(); err != nil {
 		return nil, fmt.Errorf("saving state: %w", err)
 	}

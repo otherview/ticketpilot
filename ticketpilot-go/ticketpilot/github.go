@@ -34,13 +34,20 @@ func NewGitHubClient(cfg *Config, logger *slog.Logger) GitHubClient {
 	}
 }
 
-// GetNextMention scans project items for the first unprocessed @handle mention.
-// Iterates items in order and comments chronologically; returns as soon as one
-// is found. Returns nil, nil when there is nothing pending.
+// GetNextMention scans project items for a pending @handle mention.
+//
+// For each ticket it:
+//  1. Pre-filters using issue.UpdatedAt <= cutoff to skip API calls for inactive tickets.
+//  2. Fetches comments descending (newest first) since cutoff.
+//  3. Finds the first non-bot @handle mention in desc order = last chronological mention.
+//  4. Builds thread = reverse(comments[mentionIdx:]) — chronological up to and including
+//     the mention, no post-mention noise.
+//  5. Prepends the issue body when there is no prior session (new conversation context).
+//
+// Returns nil, nil when nothing is pending.
 func (c *gitHubClient) GetNextMention(
 	ctx context.Context,
-	since time.Time,
-	isProcessed func(string) bool,
+	cutoffFor func(string) time.Time,
 	sessionFor func(string) string,
 ) (*Mention, error) {
 	items, err := c.listProjectItems(ctx)
@@ -58,11 +65,12 @@ func (c *gitHubClient) GetNextMention(
 		}
 		if *ct != gh.ProjectV2ItemContentTypeIssue && *ct != gh.ProjectV2ItemContentTypePullRequest {
 			c.log.Debug("skipping item: not issue or PR", "type", string(*ct))
-			continue // skip DraftIssues — no comments to reply to
+			continue
 		}
 
 		// Skip closed issues and closed/merged PRs.
-		if content := item.GetContent(); content != nil {
+		content := item.GetContent()
+		if content != nil {
 			if content.Issue != nil && content.Issue.GetState() == "closed" {
 				c.log.Debug("skipping item: issue is closed", "title", content.Issue.GetTitle())
 				continue
@@ -76,55 +84,126 @@ func (c *gitHubClient) GetNextMention(
 		repoOwner, repoName, issueNum, title, _, err := extractContent(item)
 		if err != nil {
 			c.log.Debug("skipping item: could not extract content", "err", err)
-			continue // skip unparseable items, don't block the rest
+			continue
 		}
 
-		c.log.Debug("scanning item", "title", title, "repo", repoOwner+"/"+repoName, "issue", issueNum)
+		ticketID := fmt.Sprintf("%s/%s#%d", repoOwner, repoName, issueNum)
+		cutoff := cutoffFor(ticketID)
 
-		comments, err := c.listCommentsSince(ctx, repoOwner, repoName, issueNum, since)
+		// Pre-filter: skip tickets not updated since the cutoff — avoids API calls.
+		var updatedAt time.Time
+		if content != nil {
+			if content.Issue != nil {
+				updatedAt = content.Issue.GetUpdatedAt().Time
+			} else if content.PullRequest != nil {
+				updatedAt = content.PullRequest.GetUpdatedAt().Time
+			}
+		}
+		if !updatedAt.IsZero() && !updatedAt.After(cutoff) {
+			c.log.Debug("skipping item: not updated since cutoff", "title", title, "updated_at", updatedAt, "cutoff", cutoff)
+			continue
+		}
+
+		c.log.Debug("scanning item", "title", title, "repo", repoOwner+"/"+repoName, "issue", issueNum, "cutoff", cutoff)
+
+		comments, err := c.listCommentsDesc(ctx, repoOwner, repoName, issueNum, cutoff)
 		if err != nil {
 			c.log.Debug("skipping item: could not list comments", "err", err)
 			continue
 		}
 
-		c.log.Debug("comments fetched", "count", len(comments), "since", since)
+		c.log.Debug("comments fetched", "count", len(comments))
 
-		// Prepend the issue/PR body as the first thread entry so the AI sees
-		// the original ticket description as part of the conversation.
-		thread := prependBody(item, comments)
+		// Find the first non-bot @handle mention in descending order.
+		// First hit = last chronological mention (most recent).
+		mentionIdx := -1
+		for i, cm := range comments {
+			if !strings.EqualFold(cm.Author, c.handle) &&
+				strings.Contains(strings.ToLower(cm.Body), "@"+c.handle) {
+				mentionIdx = i
+				break
+			}
+		}
 
-		// thread[0] is the issue/PR body (if non-empty); check it for a mention too.
-		for _, entry := range thread {
-			if isProcessed(entry.ID) {
-				c.log.Debug("skipping thread entry: already processed", "id", entry.ID)
+		hasSession := sessionFor(ticketID) != ""
+
+		if mentionIdx < 0 {
+			// No mention in comments — check if the issue body itself is the trigger.
+			// Only applies when there is no prior session (fresh conversation).
+			if hasSession {
+				c.log.Debug("skipping item: no new mention, session exists", "title", title)
 				continue
 			}
-			if !strings.Contains(strings.ToLower(entry.Body), "@"+c.handle) {
-				c.log.Debug("skipping thread entry: no mention", "id", entry.ID, "author", entry.Author)
+			bodyComment := issueBodyComment(content)
+			if bodyComment.Body == "" || !strings.Contains(strings.ToLower(bodyComment.Body), "@"+c.handle) {
+				c.log.Debug("skipping item: no mention found", "title", title)
 				continue
 			}
-
-			ticketID := fmt.Sprintf("%s/%s#%d", repoOwner, repoName, issueNum)
-
-			var sessionID *string
-			if s := sessionFor(ticketID); s != "" {
-				sessionID = &s
+			var issueCreatedAt time.Time
+			if content != nil && content.Issue != nil {
+				issueCreatedAt = content.Issue.GetCreatedAt().Time
+			} else if content != nil && content.PullRequest != nil {
+				issueCreatedAt = content.PullRequest.GetCreatedAt().Time
 			}
-
+			if !issueCreatedAt.After(cutoff) {
+				c.log.Debug("skipping item: issue body mention predates cutoff", "title", title)
+				continue
+			}
+			c.log.Debug("issue body is the trigger", "title", title)
 			return &Mention{
 				TicketID:      ticketID,
-				CommentID:     entry.ID,
+				CommentID:     bodyComment.ID,
 				Title:         title,
 				Type:          string(*ct),
 				RepoOwner:     repoOwner,
 				RepoName:      repoName,
 				IssueNumber:   issueNum,
-				CommentAuthor: entry.Author,
-				CommentBody:   entry.Body,
-				Thread:        thread,
-				SessionID:     sessionID,
+				CommentAuthor: bodyComment.Author,
+				CommentBody:   bodyComment.Body,
+				Thread:        []Comment{bodyComment},
+				SessionID:     nil,
 			}, nil
 		}
+
+		// Build thread: reverse so it is chronological (oldest → mention).
+		// Only includes comments up to and including the mention — post-mention
+		// comments are excluded to avoid confusing the AI with unrelated noise.
+		thread := reverseComments(comments[mentionIdx:])
+
+		// For a new conversation (no session) prepend the issue body so the AI
+		// has the original ticket description as context.
+		if !hasSession {
+			if bodyComment := issueBodyComment(content); bodyComment.Body != "" {
+				thread = append([]Comment{bodyComment}, thread...)
+			}
+		}
+
+		mentionEntry := comments[mentionIdx]
+		var sessionID *string
+		if s := sessionFor(ticketID); s != "" {
+			sessionID = &s
+		}
+
+		c.log.Debug("mention found",
+			"title", title,
+			"comment_id", mentionEntry.ID,
+			"has_session", sessionID != nil,
+			slog.Int("thread_length", len(thread)),
+		)
+
+		return &Mention{
+			TicketID:      ticketID,
+			CommentID:     mentionEntry.ID,
+			Title:         title,
+			Type:          string(*ct),
+			RepoOwner:     repoOwner,
+			RepoName:      repoName,
+			IssueNumber:   issueNum,
+			CommentAuthor: mentionEntry.Author,
+			CommentBody:   mentionEntry.Body,
+			Thread:        thread,
+			SessionID:     sessionID,
+		}, nil
 	}
 
 	return nil, nil
@@ -165,8 +244,10 @@ func (c *gitHubClient) listProjectItems(ctx context.Context) ([]*gh.ProjectV2Ite
 	return items, err
 }
 
-func (c *gitHubClient) listCommentsSince(ctx context.Context, owner, repo string, issueNum int, since time.Time) ([]Comment, error) {
+func (c *gitHubClient) listCommentsDesc(ctx context.Context, owner, repo string, issueNum int, since time.Time) ([]Comment, error) {
 	opts := &gh.IssueListCommentsOptions{
+		Sort:        gh.Ptr("created"),
+		Direction:   gh.Ptr("desc"),
 		Since:       &since,
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
@@ -193,41 +274,41 @@ func (c *gitHubClient) listCommentsSince(ctx context.Context, owner, repo string
 	return all, nil
 }
 
-// prependBody inserts the issue or PR body as the first Comment in the thread
-// so the AI receives the original ticket description as part of the conversation.
-// If the body is empty the thread is returned unchanged.
-func prependBody(item *gh.ProjectV2Item, comments []Comment) []Comment {
-	content := item.GetContent()
-	if content == nil {
-		return comments
+// reverseComments returns a new slice with comments in reverse order.
+func reverseComments(c []Comment) []Comment {
+	out := make([]Comment, len(c))
+	for i, v := range c {
+		out[len(c)-1-i] = v
 	}
+	return out
+}
 
-	var id, author, body string
-	var createdAt time.Time
-
+// issueBodyComment builds a synthetic Comment from the issue or PR body.
+// Returns a zero-value Comment if content is nil or the body is empty.
+func issueBodyComment(content *gh.ProjectV2ItemContent) Comment {
+	if content == nil {
+		return Comment{}
+	}
 	switch {
 	case content.Issue != nil:
-		body = content.Issue.GetBody()
-		id = fmt.Sprintf("issue:%d", content.Issue.GetID())
-		author = content.Issue.GetUser().GetLogin()
-		createdAt = content.Issue.GetCreatedAt().Time
+		return Comment{
+			ID:        fmt.Sprintf("issue:%d", content.Issue.GetID()),
+			Author:    content.Issue.GetUser().GetLogin(),
+			Body:      content.Issue.GetBody(),
+			CreatedAt: content.Issue.GetCreatedAt().Time,
+		}
 	case content.PullRequest != nil:
-		body = content.PullRequest.GetBody()
-		id = fmt.Sprintf("pr:%d", content.PullRequest.GetID())
-		author = content.PullRequest.GetUser().GetLogin()
-		createdAt = content.PullRequest.GetCreatedAt().Time
+		return Comment{
+			ID:        fmt.Sprintf("pr:%d", content.PullRequest.GetID()),
+			Author:    content.PullRequest.GetUser().GetLogin(),
+			Body:      content.PullRequest.GetBody(),
+			CreatedAt: content.PullRequest.GetCreatedAt().Time,
+		}
 	}
-
-	if body == "" {
-		return comments
-	}
-
-	first := Comment{ID: id, Author: author, Body: body, CreatedAt: createdAt}
-	return append([]Comment{first}, comments...)
+	return Comment{}
 }
 
 // extractContent pulls owner, repo, issue number and title out of a project item.
-// ProjectV2ItemContent is a union type — only Issue or PullRequest will be populated.
 func extractContent(item *gh.ProjectV2Item) (owner, repo string, number int, title, htmlURL string, err error) {
 	content := item.GetContent()
 	if content == nil {
@@ -269,8 +350,6 @@ func extractContent(item *gh.ProjectV2Item) (owner, repo string, number int, tit
 }
 
 // parseGitHubURL extracts owner, repo and issue number from a GitHub URL.
-// Handles HTML URLs:  github.com/owner/repo/issues/N
-// and API URLs:       api.github.com/repos/owner/repo/issues/N
 func parseGitHubURL(rawURL string) (owner, repo string, number int, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {

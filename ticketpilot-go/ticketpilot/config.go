@@ -16,7 +16,6 @@ type Config struct {
 	GitHubHandle string
 	ProjectURL   string
 	StateFile    string
-	LookbackDays int
 
 	// parsed from ProjectURL during LoadConfig
 	projectOwner     string
@@ -48,21 +47,12 @@ func LoadConfig(envFile string) (*Config, error) {
 		GitHubHandle: strings.TrimPrefix(strings.ToLower(os.Getenv("TICKETPILOT_GITHUB_HANDLE")), "@"),
 		ProjectURL:   os.Getenv("TICKETPILOT_PROJECT_URL"),
 		StateFile:    os.Getenv("TICKETPILOT_STATE_FILE"),
-		LookbackDays: 30,
 	}
 
 	if cfg.StateFile == "" {
 		cfg.StateFile = "state.json"
 	}
 	cfg.StateFile = expandHome(cfg.StateFile, home)
-
-	if s := os.Getenv("TICKETPILOT_LOOKBACK_DAYS"); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil {
-			return nil, fmt.Errorf("TICKETPILOT_LOOKBACK_DAYS must be an integer: %w", err)
-		}
-		cfg.LookbackDays = n
-	}
 
 	var missing []string
 	if cfg.GitHubPAT == "" {

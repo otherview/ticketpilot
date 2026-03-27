@@ -46,22 +46,20 @@ type ReplyResult struct {
 // GitHubClient is the interface for GitHub operations.
 // Implementations are expected to have project coordinates baked in at construction time.
 type GitHubClient interface {
-	GetNextMention(ctx context.Context, since time.Time, isProcessed func(string) bool, sessionFor func(string) string) (*Mention, error)
+	GetNextMention(ctx context.Context, cutoffFor func(string) time.Time, sessionFor func(string) string) (*Mention, error)
 	PostComment(ctx context.Context, repoOwner, repoName string, issueNumber int, body string) error
 }
 
 // StateStore is the interface for persisting TicketPilot state.
 type StateStore interface {
-	IsProcessed(commentID string) bool
+	StartedAt() *time.Time
+	SetStartedAt(t time.Time)
 	SessionFor(ticketID string) string
+	SetSession(ticketID, sessionID string)
+	LastRepliedAt(ticketID string) *time.Time
+	SetLastRepliedAt(ticketID string, t time.Time)
 	RecordTicket(ticketID, repoOwner, repoName string, issueNumber int)
 	TicketLocation(ticketID string) (repoOwner, repoName string, issueNumber int, ok bool)
-	MarkProcessed(commentID string)
-	SetSession(ticketID, sessionID string)
-	LastProcessedComment(ticketID string) string
-	SetLastProcessedComment(ticketID, commentID string)
-	GetLastRunAt() *time.Time
-	SetLastRunAt(t time.Time)
 	Save() error
 }
 
