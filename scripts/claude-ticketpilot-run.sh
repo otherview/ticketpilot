@@ -53,7 +53,11 @@ fi
 # ---------------------------------------------------------------------------
 
 log "Scanning for pending mentions..."
-SCAN=$($TP scan -v $TP_ENV_OPT)
+_scan_out=$(mktemp)
+# shellcheck disable=SC2086
+$TP scan -v $TP_ENV_OPT > "$_scan_out"   # debug logs → stderr (visible inline); JSON → file
+SCAN=$(cat "$_scan_out")
+rm -f "$_scan_out"
 PENDING=$(echo "$SCAN" | jq -r '.pending')
 
 if [ "$PENDING" = "false" ]; then
@@ -70,7 +74,8 @@ REPO_OWNER=$(echo "$SCAN"   | jq -r '.repo_owner')
 REPO_NAME=$(echo "$SCAN"    | jq -r '.repo_name')
 ISSUE_NUMBER=$(echo "$SCAN" | jq -r '.issue_number')
 
-log "Pending mention on $TYPE: $TITLE (ticket: $TICKET_ID)"
+THREAD_LEN=$(echo "$SCAN" | jq -r '.thread | length')
+log "Pending mention on $TYPE: $TITLE (ticket: $TICKET_ID, thread: ${THREAD_LEN} comments, session: ${SESSION_ID})"
 
 # ---------------------------------------------------------------------------
 # Prepare repository
@@ -105,15 +110,15 @@ PROMPT=$(echo "$SCAN" | "$SCRIPT_DIR/prompt.sh")
 # Call Claude
 # ---------------------------------------------------------------------------
 
-log "Calling Claude..."
-
 SYSTEM_PROMPT=$(cat "$AGENTS_FILE")
 if [ "$SESSION_ID" = "null" ]; then
+  log "Calling Claude (new session)..."
   RESPONSE=$(claude -p "$PROMPT" \
     --system-prompt "$SYSTEM_PROMPT" \
     --output-format json \
     --dangerously-skip-permissions)
 else
+  log "Calling Claude (resuming session: $SESSION_ID)..."
   # Attempt to resume; fall back to a fresh conversation if the session is gone.
   RESPONSE=$(claude --resume "$SESSION_ID" -p "$PROMPT" \
     --output-format json \
@@ -128,6 +133,8 @@ fi
 
 NEW_SESSION_ID=$(echo "$RESPONSE" | jq -r '.session_id')
 REPLY_BODY=$(echo "$RESPONSE"     | jq -r '.result')
+REPLY_LEN=${#REPLY_BODY}
+log "Claude responded (session: $NEW_SESSION_ID, reply: ${REPLY_LEN} chars)"
 
 if [ -z "$REPLY_BODY" ] || [ "$REPLY_BODY" = "null" ]; then
   echo "ERROR: Claude returned empty reply. Aborting without posting." >&2
