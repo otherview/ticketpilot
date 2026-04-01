@@ -224,6 +224,36 @@ func (c *gitHubClient) PostComment(ctx context.Context, repoOwner, repoName stri
 	return nil
 }
 
+// CreateIssue creates a new issue in the target repository.
+func (c *gitHubClient) CreateIssue(ctx context.Context, repoOwner, repoName, title, body string) (issueNumber int, issueID int64, issueURL string, err error) {
+	req := &gh.IssueRequest{Title: gh.Ptr(title)}
+	if strings.TrimSpace(body) != "" {
+		req.Body = gh.Ptr(body)
+	}
+	issue, _, err := c.gh.Issues.Create(ctx, repoOwner, repoName, req)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("creating issue: %w", err)
+	}
+	return issue.GetNumber(), issue.GetID(), issue.GetHTMLURL(), nil
+}
+
+// AddIssueToProject adds an issue to the configured project.
+func (c *gitHubClient) AddIssueToProject(ctx context.Context, issueID int64) (projectItemID int64, err error) {
+	opts := &gh.AddProjectItemOptions{Type: gh.Ptr(gh.ProjectV2ItemContentTypeIssue), ID: gh.Ptr(issueID)}
+	if c.ownerType == "org" {
+		item, _, err := c.gh.Projects.AddOrganizationProjectItem(ctx, c.owner, c.projectNumber, opts)
+		if err != nil {
+			return 0, fmt.Errorf("adding issue to org project: %w", err)
+		}
+		return item.GetID(), nil
+	}
+	item, _, err := c.gh.Projects.AddUserProjectItem(ctx, c.owner, c.projectNumber, opts)
+	if err != nil {
+		return 0, fmt.Errorf("adding issue to user project: %w", err)
+	}
+	return item.GetID(), nil
+}
+
 // --- internal helpers ---
 
 func (c *gitHubClient) listProjectItems(ctx context.Context) ([]*gh.ProjectV2Item, error) {

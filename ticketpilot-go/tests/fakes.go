@@ -39,7 +39,11 @@ type FakeGitHubClient struct {
 	Handle         string // e.g. "bot"
 	Mentions       []*ticketpilot.Mention
 	PostedComments []PostedComment
+	CreatedIssues  []CreatedIssue
+	ProjectAdds    []ProjectAdd
 	Err            error // returned by GetNextMention when set
+	CreateErr      error
+	AddProjectErr  error
 }
 
 type PostedComment struct {
@@ -47,6 +51,21 @@ type PostedComment struct {
 	RepoName    string
 	IssueNumber int
 	Body        string
+}
+
+type CreatedIssue struct {
+	RepoOwner string
+	RepoName  string
+	Title     string
+	Body      string
+	Number    int
+	ID        int64
+	URL       string
+}
+
+type ProjectAdd struct {
+	IssueID int64
+	ItemID  int64
 }
 
 func (f *FakeGitHubClient) GetNextMention(
@@ -117,6 +136,26 @@ func (f *FakeGitHubClient) PostComment(_ context.Context, repoOwner, repoName st
 		}
 	}
 	return nil
+}
+
+func (f *FakeGitHubClient) CreateIssue(_ context.Context, repoOwner, repoName, title, body string) (issueNumber int, issueID int64, issueURL string, err error) {
+	if f.CreateErr != nil {
+		return 0, 0, "", f.CreateErr
+	}
+	n := len(f.CreatedIssues) + 1
+	id := int64(1000 + n)
+	url := fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, n)
+	f.CreatedIssues = append(f.CreatedIssues, CreatedIssue{RepoOwner: repoOwner, RepoName: repoName, Title: title, Body: body, Number: n, ID: id, URL: url})
+	return n, id, url, nil
+}
+
+func (f *FakeGitHubClient) AddIssueToProject(_ context.Context, issueID int64) (projectItemID int64, err error) {
+	if f.AddProjectErr != nil {
+		return 0, f.AddProjectErr
+	}
+	itemID := int64(5000 + len(f.ProjectAdds) + 1)
+	f.ProjectAdds = append(f.ProjectAdds, ProjectAdd{IssueID: issueID, ItemID: itemID})
+	return itemID, nil
 }
 
 // filterDesc returns comments with CreatedAt strictly after cutoff, in
