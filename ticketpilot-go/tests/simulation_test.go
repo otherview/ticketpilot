@@ -325,6 +325,35 @@ func TestReply_UnknownTicket(t *testing.T) {
 	}
 }
 
+// TestCreate_Success: issue created, added to project, and recorded in state.
+func TestCreate_Success(t *testing.T) {
+	gh := newFakeGH()
+	st := newFakeStateWithAnchor()
+
+	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(), "owner", "repo", "New tweet ticket", "body",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.TicketID != "owner/repo#1" {
+		t.Fatalf("ticket id: want owner/repo#1, got %s", result.TicketID)
+	}
+	if len(gh.CreatedIssues) != 1 {
+		t.Fatalf("expected 1 created issue, got %d", len(gh.CreatedIssues))
+	}
+	if len(gh.ProjectAdds) != 1 {
+		t.Fatalf("expected 1 project add, got %d", len(gh.ProjectAdds))
+	}
+	owner, repo, num, ok := st.TicketLocation("owner/repo#1")
+	if !ok || owner != "owner" || repo != "repo" || num != 1 {
+		t.Fatalf("ticket location not recorded correctly: %v %s/%s#%d", ok, owner, repo, num)
+	}
+	if st.SaveCalls != 1 {
+		t.Fatalf("expected 1 Save call, got %d", st.SaveCalls)
+	}
+}
+
 // TestScanReplyFlow: full round-trip — Scan finds a mention, Reply posts a
 // response, a second Scan sees the mention is now before lastRepliedAt and skips it.
 func TestScanReplyFlow(t *testing.T) {

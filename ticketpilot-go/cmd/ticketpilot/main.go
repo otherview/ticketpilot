@@ -45,6 +45,16 @@ type replyOutput struct {
 	SessionID string `json:"session_id"`
 }
 
+type createOutput struct {
+	Success       bool   `json:"success"`
+	TicketID      string `json:"ticket_id"`
+	RepoOwner     string `json:"repo_owner"`
+	RepoName      string `json:"repo_name"`
+	IssueNumber   int    `json:"issue_number"`
+	IssueURL      string `json:"issue_url"`
+	ProjectItemID int64  `json:"project_item_id"`
+}
+
 // --- root command ---
 
 var (
@@ -135,6 +145,19 @@ var replyCmd = &cobra.Command{
 	RunE:  runReply,
 }
 
+var (
+	createRepoOwner string
+	createRepoName  string
+	createTitle     string
+	createBody      string
+)
+
+var createCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create an issue and add it to the configured GitHub Project",
+	RunE:  runCreate,
+}
+
 func runReply(cmd *cobra.Command, _ []string) error {
 	cfg, err := ticketpilot.LoadConfig(envFile)
 	if err != nil {
@@ -175,6 +198,36 @@ func runReply(cmd *cobra.Command, _ []string) error {
 	})
 }
 
+func runCreate(cmd *cobra.Command, _ []string) error {
+	cfg, err := ticketpilot.LoadConfig(envFile)
+	if err != nil {
+		return err
+	}
+
+	st, err := ticketpilot.LoadState(cfg.StateFile)
+	if err != nil {
+		return err
+	}
+
+	gh := ticketpilot.NewGitHubClient(cfg, newLogger())
+	tp := ticketpilot.New(gh, st, cfg, newLogger())
+
+	result, err := tp.Create(cmd.Context(), createRepoOwner, createRepoName, createTitle, createBody)
+	if err != nil {
+		return err
+	}
+
+	return writeJSON(createOutput{
+		Success:       true,
+		TicketID:      result.TicketID,
+		RepoOwner:     result.RepoOwner,
+		RepoName:      result.RepoName,
+		IssueNumber:   result.IssueNumber,
+		IssueURL:      result.IssueURL,
+		ProjectItemID: result.ProjectItemID,
+	})
+}
+
 // --- helpers ---
 
 func writeJSON(v any) error {
@@ -195,7 +248,15 @@ func main() {
 	_ = replyCmd.MarkFlagRequired("comment-id")
 	_ = replyCmd.MarkFlagRequired("session-id")
 
-	rootCmd.AddCommand(scanCmd, replyCmd)
+	createCmd.Flags().StringVar(&createRepoOwner, "repo-owner", "", "Repository owner for the new issue (required)")
+	createCmd.Flags().StringVar(&createRepoName, "repo-name", "", "Repository name for the new issue (required)")
+	createCmd.Flags().StringVar(&createTitle, "title", "", "Issue title (required)")
+	createCmd.Flags().StringVar(&createBody, "body", "", "Issue body (optional)")
+	_ = createCmd.MarkFlagRequired("repo-owner")
+	_ = createCmd.MarkFlagRequired("repo-name")
+	_ = createCmd.MarkFlagRequired("title")
+
+	rootCmd.AddCommand(scanCmd, replyCmd, createCmd)
 
 	if err := rootCmd.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)

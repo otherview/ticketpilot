@@ -43,11 +43,23 @@ type ReplyResult struct {
 	SessionID string
 }
 
+// CreateResult is the output of a Create call.
+type CreateResult struct {
+	TicketID      string
+	RepoOwner     string
+	RepoName      string
+	IssueNumber   int
+	IssueURL      string
+	ProjectItemID int64
+}
+
 // GitHubClient is the interface for GitHub operations.
 // Implementations are expected to have project coordinates baked in at construction time.
 type GitHubClient interface {
 	GetNextMention(ctx context.Context, cutoffFor func(string) time.Time, sessionFor func(string) string) (*Mention, error)
 	PostComment(ctx context.Context, repoOwner, repoName string, issueNumber int, body string) error
+	CreateIssue(ctx context.Context, repoOwner, repoName, title, body string) (issueNumber int, issueID int64, issueURL string, err error)
+	AddIssueToProject(ctx context.Context, issueID int64) (projectItemID int64, err error)
 }
 
 // StateStore is the interface for persisting TicketPilot state.

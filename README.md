@@ -42,6 +42,7 @@ make build
 ```
 ticketpilot scan              # prints JSON: pending mention or {pending:false}
 ticketpilot reply             # posts reply; --ticket-id --comment-id --session-id required
+ticketpilot create            # creates issue + adds to configured project; --repo-owner --repo-name --title required
 ```
 
 ## Agent behaviour
