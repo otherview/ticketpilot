@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"time"
+
+	gh "github.com/google/go-github/v84/github"
 )
 
 // Comment is a single comment on a GitHub issue or PR.
@@ -48,6 +50,11 @@ type ReplyResult struct {
 type GitHubClient interface {
 	GetNextMention(ctx context.Context, cutoffFor func(string) time.Time, sessionFor func(string) string) (*Mention, error)
 	PostComment(ctx context.Context, repoOwner, repoName string, issueNumber int, body string) error
+	CreateIssue(ctx context.Context, title, body string) (issueNum int, issueID int64, err error)
+	ListProjects(ctx context.Context, org string) ([]*gh.ProjectV2, error)
+	ListProjectFields(ctx context.Context, org string, projectNumber int) ([]*gh.ProjectV2Field, error)
+	AddProjectItem(ctx context.Context, org string, projectNumber int, issueNum int64) (*gh.ProjectV2Item, error)
+	UpdateProjectItem(ctx context.Context, org string, projectNumber int, itemID int64, fields []*gh.UpdateProjectV2Field) error
 }
 
 // StateStore is the interface for persisting TicketPilot state.

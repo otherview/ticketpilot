@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/google/go-github/v84/github"
 	"github.com/otherview/ticketpilot/ticketpilot"
 )
 
@@ -40,6 +41,33 @@ type FakeGitHubClient struct {
 	Mentions       []*ticketpilot.Mention
 	PostedComments []PostedComment
 	Err            error // returned by GetNextMention when set
+
+	// Create / project fields
+	CreatedIssues  []CreatedIssue
+	Projects       []string // project names
+	ProjectFields  []string // field names
+	ProjectOptions []string // status option names
+	AddedItems     []AddedProjectItem
+	UpdatedItems   []UpdatedProjectItem
+}
+
+type CreatedIssue struct {
+	Title  string
+	Body   string
+	Number int
+}
+
+type AddedProjectItem struct {
+	IssueNum      int64
+	ProjectNumber int
+	Org           string
+}
+
+type UpdatedProjectItem struct {
+	ItemID        int64
+	ProjectNumber int
+	Org           string
+	Fields        []*gh.UpdateProjectV2Field
 }
 
 type PostedComment struct {
@@ -116,6 +144,67 @@ func (f *FakeGitHubClient) PostComment(_ context.Context, repoOwner, repoName st
 			break
 		}
 	}
+	return nil
+}
+
+func (f *FakeGitHubClient) CreateIssue(_ context.Context, title, body string) (int, int64, error) {
+	if f.Err != nil {
+		return 0, 0, f.Err
+	}
+	num := len(f.CreatedIssues) + 1
+	f.CreatedIssues = append(f.CreatedIssues, CreatedIssue{Title: title, Body: body, Number: num})
+	return num, int64(num * 1000000), nil
+}
+
+func (f *FakeGitHubClient) ListProjects(_ context.Context, org string) ([]*gh.ProjectV2, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	var projects []*gh.ProjectV2
+	for i, name := range f.Projects {
+		num := i + 1
+		p := &gh.ProjectV2{Name: &name, Number: gh.Ptr(num)}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+func (f *FakeGitHubClient) ListProjectFields(_ context.Context, org string, projectNumber int) ([]*gh.ProjectV2Field, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	var fields []*gh.ProjectV2Field
+	for i, name := range f.ProjectFields {
+		fieldID := int64(i + 1)
+		fld := &gh.ProjectV2Field{Name: &name, ID: &fieldID, Options: []*gh.ProjectV2FieldOption{}}
+		// Add status options if this is the Status field
+		if name == "Status" {
+			for j, opt := range f.ProjectOptions {
+				optID := fmt.Sprintf("opt-%s-%d", name, j)
+				raw := opt
+				optName := &gh.ProjectV2TextContent{Raw: &raw}
+				fld.Options = append(fld.Options, &gh.ProjectV2FieldOption{ID: &optID, Name: optName})
+			}
+		}
+		fields = append(fields, fld)
+	}
+	return fields, nil
+}
+
+func (f *FakeGitHubClient) AddProjectItem(_ context.Context, org string, projectNumber int, issueNum int64) (*gh.ProjectV2Item, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	f.AddedItems = append(f.AddedItems, AddedProjectItem{IssueNum: issueNum, ProjectNumber: projectNumber, Org: org})
+	itemID := int64(len(f.AddedItems))
+	return &gh.ProjectV2Item{ID: &itemID}, nil
+}
+
+func (f *FakeGitHubClient) UpdateProjectItem(_ context.Context, org string, projectNumber int, itemID int64, fields []*gh.UpdateProjectV2Field) error {
+	if f.Err != nil {
+		return f.Err
+	}
+	f.UpdatedItems = append(f.UpdatedItems, UpdatedProjectItem{ItemID: itemID, ProjectNumber: projectNumber, Org: org, Fields: fields})
 	return nil
 }
 

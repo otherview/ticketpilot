@@ -2,13 +2,21 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/otherview/ticketpilot/ticketpilot"
 )
 
-var testCfg = &ticketpilot.Config{}
+var testCfg = &ticketpilot.Config{GitHubRepo: "owner/repo"}
+
+func init() {
+	// Populate the repoOwner/repoName fields that LoadConfig would normally set.
+	if err := testCfg.ParseGitHubRepo(); err != nil {
+		panic(fmt.Sprintf("test config ParseGitHubRepo: %v", err))
+	}
+}
 
 // anchor is used as the startedAt time in tests. Comments must have
 // CreatedAt after anchor to be visible to the scanner.
@@ -359,5 +367,186 @@ func TestScanReplyFlow(t *testing.T) {
 	}
 	if scan2.Pending {
 		t.Error("scan 2: expected Pending=false — mention is before lastRepliedAt")
+	}
+}
+
+// --- Create simulation tests ---
+
+// newFakeGHWithProject builds a FakeGitHubClient pre-configured with a project
+// matching the repo name and a Status field with the given options.
+func newFakeGHWithProject(projectName, repoName string, statusOptions []string) *FakeGitHubClient {
+	return &FakeGitHubClient{
+		Handle:         "bot",
+		Mentions:       nil,
+		Projects:       []string{projectName},
+		ProjectFields:  []string{"Status"},
+		ProjectOptions: statusOptions,
+	}
+}
+
+// TestCreate_Success: successful create — issue created, project item added,
+// state recorded and saved.
+func TestCreate_Success(t *testing.T) {
+	gh := newFakeGHWithProject("repo", "repo", []string{"Todo", "In Progress", "Done"})
+	st := newFakeStateWithAnchor()
+
+	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X to the system.",
+		"Todo",
+		"", // no session ID
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.TicketID != "owner/repo#1" {
+		t.Errorf("TicketID: want owner/repo#1, got %s", result.TicketID)
+	}
+	if result.IssueNumber != 1 {
+		t.Errorf("IssueNumber: want 1, got %d", result.IssueNumber)
+	}
+	if result.IssueURL != "https://github.com/owner/repo/issues/1" {
+		t.Errorf("IssueURL: want https://github.com/owner/repo/issues/1, got %s", result.IssueURL)
+	}
+	if result.ProjectColumn != "Todo" {
+		t.Errorf("ProjectColumn: want Todo, got %s", result.ProjectColumn)
+	}
+	// issue was created
+	if len(gh.CreatedIssues) != 1 {
+		t.Fatalf("expected 1 created issue, got %d", len(gh.CreatedIssues))
+	}
+	if gh.CreatedIssues[0].Title != "Add feature X" {
+		t.Errorf("issue title: want Add feature X, got %s", gh.CreatedIssues[0].Title)
+	}
+	// project item was added
+	if len(gh.AddedItems) != 1 {
+		t.Fatalf("expected 1 added project item, got %d", len(gh.AddedItems))
+	}
+	// state recorded
+	_, _, num, ok := st.TicketLocation("owner/repo#1")
+	if !ok || num != 1 {
+		t.Errorf("expected ticket recorded in state: ok=%v num=%d", ok, num)
+	}
+	if st.SaveCalls != 1 {
+		t.Errorf("expected 1 Save call, got %d", st.SaveCalls)
+	}
+}
+
+// TestCreate_WithSession: create with a session ID stores it in state.
+func TestCreate_WithSession(t *testing.T) {
+	gh := newFakeGHWithProject("repo", "repo", []string{"Todo", "In Progress", "Done"})
+	st := newFakeStateWithAnchor()
+
+	_, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"In Progress",
+		"session-abc",
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.SessionFor("owner/repo#1") != "session-abc" {
+		t.Error("expected session to be stored")
+	}
+}
+
+// TestCreate_InvalidColumn: status option does not match any available → error.
+func TestCreate_InvalidColumn(t *testing.T) {
+	gh := newFakeGHWithProject("repo", "repo", []string{"Todo", "Done"})
+	st := newFakeStateWithAnchor()
+
+	_, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"Nonexistent",
+		"",
+	)
+
+	if err == nil {
+		t.Fatal("expected an error for an invalid project column")
+	}
+}
+
+// TestCreate_GHError: CreateIssue returns an error → Create propagates it.
+func TestCreate_GHError(t *testing.T) {
+	gh := &FakeGitHubClient{
+		Handle:    "bot",
+		Projects:  []string{"repo"},
+		Err:       fmt.Errorf("API rate limit exceeded"),
+		Mentions:  nil,
+	}
+	st := newFakeStateWithAnchor()
+
+	_, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"Todo",
+		"",
+	)
+
+	if err == nil {
+		t.Fatal("expected an error when CreateIssue fails")
+	}
+	// no issue should have been created
+	if len(gh.CreatedIssues) != 0 {
+		t.Errorf("expected 0 created issues, got %d", len(gh.CreatedIssues))
+	}
+}
+
+// TestCreate_ProjectNameCaseInsensitive: project "Repo" should be found when
+// configured repo name is "repo" — matching must be case-insensitive.
+func TestCreate_ProjectNameCaseInsensitive(t *testing.T) {
+	gh := newFakeGHWithProject("Repo", "repo", []string{"Todo", "Done"})
+	st := newFakeStateWithAnchor()
+
+	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"Todo",
+		"",
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// project should have been found despite casing mismatch
+	if result.RepoName != "repo" {
+		t.Errorf("RepoName: want repo, got %s", result.RepoName)
+	}
+	if len(gh.CreatedIssues) != 1 {
+		t.Fatalf("expected 1 created issue, got %d", len(gh.CreatedIssues))
+	}
+	if len(gh.AddedItems) != 1 {
+		t.Fatalf("expected 1 added project item, got %d", len(gh.AddedItems))
+	}
+}
+
+// TestCreate_ProjectNotFound: no project matching repo name → error.
+func TestCreate_ProjectNotFound(t *testing.T) {
+	gh := &FakeGitHubClient{
+		Handle:   "bot",
+		Projects: []string{"other-project"}, // does not match repo name
+		Err:      nil,
+	}
+	st := newFakeStateWithAnchor()
+
+	_, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"Todo",
+		"",
+	)
+
+	if err == nil {
+		t.Fatal("expected an error when project is not found")
 	}
 }
