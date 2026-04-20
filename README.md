@@ -7,6 +7,7 @@ A GitHub Project bot that scans for `@handle` mentions on issues and PRs, invoke
 1. `ticketpilot scan` — finds the next unprocessed mention in your GitHub Project
 2. The shell wrapper calls Claude (or another AI) with the mention context
 3. `ticketpilot reply` — posts the AI's response and records the session
+4. `ticketpilot create` — creates a new issue and adds it to the project board
 
 ## Requirements
 
@@ -42,7 +43,25 @@ make build
 ```
 ticketpilot scan              # prints JSON: pending mention or {pending:false}
 ticketpilot reply             # posts reply; --ticket-id --comment-id --session-id required
+ticketpilot create            # creates an issue; --title --body --project-column required
 ```
+
+## `ticketpilot create`
+
+```bash
+ticketpilot create \
+  --title "Add dark mode support" \
+  --body "User requested dark mode." \
+  --project-column "Todo" \
+  --session-id "optional-session-id"
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--title` | Yes | Issue title |
+| `--body` | Yes | Issue body (markdown) |
+| `--project-column` | Yes | Status option name (e.g. "Todo", "In Progress", "Done") |
+| `--session-id` | No | Session/conversation ID |
 
 ## Agent behaviour
 

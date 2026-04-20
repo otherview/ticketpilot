@@ -19,6 +19,8 @@ type gitHubClient struct {
 	owner         string
 	ownerType     string
 	projectNumber int
+	repoOwner     string
+	repoName      string
 	log           *slog.Logger
 }
 
@@ -30,6 +32,8 @@ func NewGitHubClient(cfg *Config, logger *slog.Logger) GitHubClient {
 		owner:         cfg.projectOwner,
 		ownerType:     cfg.projectOwnerType,
 		projectNumber: cfg.projectNumber,
+		repoOwner:     cfg.repoOwner,
+		repoName:      cfg.repoName,
 		log:           logger,
 	}
 }
@@ -220,6 +224,89 @@ func (c *gitHubClient) PostComment(ctx context.Context, repoOwner, repoName stri
 	)
 	if err != nil {
 		return fmt.Errorf("posting comment: %w", err)
+	}
+	return nil
+}
+
+// CreateIssue creates a new issue in the configured repository.
+func (c *gitHubClient) CreateIssue(ctx context.Context, title, body string) (issueNum int, issueID int64, err error) {
+	owner, repo := c.repoOwner, c.repoName
+	if owner == "" || repo == "" {
+		return 0, 0, fmt.Errorf("GitHubRepo not configured in config")
+	}
+	issue, _, err := c.gh.Issues.Create(ctx, owner, repo, &gh.IssueRequest{
+		Title: gh.Ptr(title),
+		Body:  gh.Ptr(body),
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("creating issue: %w", err)
+	}
+	return issue.GetNumber(), issue.GetID(), nil
+}
+
+// ListProjects lists organization-owned projects by name.
+func (c *gitHubClient) ListProjects(ctx context.Context, org string) ([]*gh.ProjectV2, error) {
+	if org == "" {
+		return nil, fmt.Errorf("org parameter required")
+	}
+	opts := &gh.ListProjectsOptions{
+		ListProjectsPaginationOptions: gh.ListProjectsPaginationOptions{
+			PerPage: 100,
+		},
+	}
+	projects, _, err := c.gh.Projects.ListOrganizationProjects(ctx, org, opts)
+	if err != nil {
+		return nil, fmt.Errorf("listing projects for org %q: %w", org, err)
+	}
+	return projects, nil
+}
+
+// ListProjectFields lists project V2 fields for a project.
+func (c *gitHubClient) ListProjectFields(ctx context.Context, org string, projectNumber int) ([]*gh.ProjectV2Field, error) {
+	if org == "" {
+		return nil, fmt.Errorf("org parameter required")
+	}
+	opts := &gh.ListProjectsOptions{
+		ListProjectsPaginationOptions: gh.ListProjectsPaginationOptions{
+			PerPage: 100,
+		},
+	}
+	fields, _, err := c.gh.Projects.ListOrganizationProjectFields(ctx, org, projectNumber, opts)
+	if err != nil {
+		return nil, fmt.Errorf("listing project fields for org %q project %d: %w", org, projectNumber, err)
+	}
+	return fields, nil
+}
+
+// AddProjectItem adds an issue to a project V2 and returns the created item.
+// It does NOT set field values — use UpdateProjectItem for that.
+func (c *gitHubClient) AddProjectItem(ctx context.Context, org string, projectNumber int, issueNum int64) (*gh.ProjectV2Item, error) {
+	if org == "" {
+		return nil, fmt.Errorf("org parameter required")
+	}
+	contentType := gh.ProjectV2ItemContentTypeIssue
+	opts := &gh.AddProjectItemOptions{
+		Type: &contentType,
+		ID:   gh.Ptr(issueNum),
+	}
+	item, _, err := c.gh.Projects.AddOrganizationProjectItem(ctx, org, projectNumber, opts)
+	if err != nil {
+		return nil, fmt.Errorf("adding project item for org %q project %d: %w", org, projectNumber, err)
+	}
+	return item, nil
+}
+
+// UpdateProjectItem updates fields on an existing project V2 item.
+func (c *gitHubClient) UpdateProjectItem(ctx context.Context, org string, projectNumber int, itemID int64, fields []*gh.UpdateProjectV2Field) error {
+	if org == "" {
+		return fmt.Errorf("org parameter required")
+	}
+	opts := &gh.UpdateProjectItemOptions{
+		Fields: fields,
+	}
+	_, _, err := c.gh.Projects.UpdateOrganizationProjectItem(ctx, org, projectNumber, itemID, opts)
+	if err != nil {
+		return fmt.Errorf("updating project item for org %q project %d: %w", org, projectNumber, err)
 	}
 	return nil
 }

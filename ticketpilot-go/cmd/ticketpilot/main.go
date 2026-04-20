@@ -45,6 +45,16 @@ type replyOutput struct {
 	SessionID string `json:"session_id"`
 }
 
+type createOutput struct {
+	TicketID      string `json:"ticket_id"`
+	RepoOwner     string `json:"repo_owner"`
+	RepoName      string `json:"repo_name"`
+	IssueNumber   int    `json:"issue_number"`
+	IssueURL      string `json:"issue_url"`
+	ProjectColumn string `json:"project_column"`
+	SessionID     string `json:"session_id"`
+}
+
 // --- root command ---
 
 var (
@@ -175,6 +185,51 @@ func runReply(cmd *cobra.Command, _ []string) error {
 	})
 }
 
+// --- create ---
+
+var (
+	createTitle      string
+	createBody       string
+	createProjectCol string
+	createSessionID  string
+)
+
+var createCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a new issue and add it to the project board",
+	RunE:  runCreate,
+}
+
+func runCreate(cmd *cobra.Command, _ []string) error {
+	cfg, err := ticketpilot.LoadConfig(envFile)
+	if err != nil {
+		return err
+	}
+
+	st, err := ticketpilot.LoadState(cfg.StateFile)
+	if err != nil {
+		return err
+	}
+
+	gh := ticketpilot.NewGitHubClient(cfg, newLogger())
+	tp := ticketpilot.New(gh, st, cfg, newLogger())
+
+	result, err := tp.Create(cmd.Context(), createTitle, createBody, createProjectCol, createSessionID)
+	if err != nil {
+		return err
+	}
+
+	return writeJSON(createOutput{
+		TicketID:      result.TicketID,
+		RepoOwner:     result.RepoOwner,
+		RepoName:      result.RepoName,
+		IssueNumber:   result.IssueNumber,
+		IssueURL:      result.IssueURL,
+		ProjectColumn: result.ProjectColumn,
+		SessionID:     result.SessionID,
+	})
+}
+
 // --- helpers ---
 
 func writeJSON(v any) error {
@@ -195,7 +250,16 @@ func main() {
 	_ = replyCmd.MarkFlagRequired("comment-id")
 	_ = replyCmd.MarkFlagRequired("session-id")
 
-	rootCmd.AddCommand(scanCmd, replyCmd)
+	// create flags
+	createCmd.Flags().StringVar(&createTitle, "title", "", "Issue title (required)")
+	createCmd.Flags().StringVar(&createBody, "body", "", "Issue body (required)")
+	createCmd.Flags().StringVar(&createProjectCol, "project-column", "", "Status column name for the project board (required)")
+	createCmd.Flags().StringVar(&createSessionID, "session-id", "", "Session/conversation ID (optional)")
+	_ = createCmd.MarkFlagRequired("title")
+	_ = createCmd.MarkFlagRequired("body")
+	_ = createCmd.MarkFlagRequired("project-column")
+
+	rootCmd.AddCommand(scanCmd, replyCmd, createCmd)
 
 	if err := rootCmd.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)

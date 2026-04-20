@@ -16,11 +16,16 @@ type Config struct {
 	GitHubHandle string
 	ProjectURL   string
 	StateFile    string
+	GitHubRepo   string
 
 	// parsed from ProjectURL during LoadConfig
 	projectOwner     string
 	projectOwnerType string
 	projectNumber    int
+
+	// parsed from GitHubRepo during LoadConfig
+	repoOwner string
+	repoName  string
 }
 
 // LoadConfig loads configuration from an env file then reads TICKETPILOT_*
@@ -47,6 +52,7 @@ func LoadConfig(envFile string) (*Config, error) {
 		GitHubHandle: strings.TrimPrefix(strings.ToLower(os.Getenv("TICKETPILOT_GITHUB_HANDLE")), "@"),
 		ProjectURL:   os.Getenv("TICKETPILOT_PROJECT_URL"),
 		StateFile:    os.Getenv("TICKETPILOT_STATE_FILE"),
+		GitHubRepo:   os.Getenv("TICKETPILOT_REPO"),
 	}
 
 	if cfg.StateFile == "" {
@@ -64,6 +70,9 @@ func LoadConfig(envFile string) (*Config, error) {
 	if cfg.ProjectURL == "" {
 		missing = append(missing, "TICKETPILOT_PROJECT_URL")
 	}
+	if cfg.GitHubRepo == "" {
+		missing = append(missing, "TICKETPILOT_REPO")
+	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf(
 			"missing required config: %s\nSet via .env file (use --env-file to specify a path) or environment variables",
@@ -78,6 +87,12 @@ func LoadConfig(envFile string) (*Config, error) {
 	cfg.projectOwner = owner
 	cfg.projectOwnerType = ownerType
 	cfg.projectNumber = number
+
+	// Parse GitHubRepo as "owner/repo"
+	cfg.repoOwner, cfg.repoName, err = parseGitHubRepo(cfg.GitHubRepo)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TICKETPILOT_REPO: %w", err)
+	}
 
 	return cfg, nil
 }
@@ -157,4 +172,22 @@ func expandHome(path, home string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// parseGitHubRepo parses "owner/repo" into separate owner and repo components.
+func parseGitHubRepo(repo string) (owner, name string, err error) {
+	parts := strings.Split(strings.TrimSpace(repo), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("expected format \"owner/repo\", got %q", repo)
+	}
+	return parts[0], parts[1], nil
+}
+
+// ParseGitHubRepo populates the repoOwner and repoName fields from the
+// GitHubRepo config value.  This is intended for test use where Config
+// instances are constructed directly without going through LoadConfig.
+func (c *Config) ParseGitHubRepo() error {
+	var err error
+	c.repoOwner, c.repoName, err = parseGitHubRepo(c.GitHubRepo)
+	return err
 }
