@@ -500,6 +500,35 @@ func TestCreate_GHError(t *testing.T) {
 	}
 }
 
+// TestCreate_ProjectNameCaseInsensitive: project "Repo" should be found when
+// configured repo name is "repo" — matching must be case-insensitive.
+func TestCreate_ProjectNameCaseInsensitive(t *testing.T) {
+	gh := newFakeGHWithProject("Repo", "repo", []string{"Todo", "Done"})
+	st := newFakeStateWithAnchor()
+
+	result, err := ticketpilot.New(gh, st, testCfg, newTestLogger(t)).Create(
+		context.Background(),
+		"Add feature X",
+		"This adds feature X.",
+		"Todo",
+		"",
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// project should have been found despite casing mismatch
+	if result.RepoName != "repo" {
+		t.Errorf("RepoName: want repo, got %s", result.RepoName)
+	}
+	if len(gh.CreatedIssues) != 1 {
+		t.Fatalf("expected 1 created issue, got %d", len(gh.CreatedIssues))
+	}
+	if len(gh.AddedItems) != 1 {
+		t.Fatalf("expected 1 added project item, got %d", len(gh.AddedItems))
+	}
+}
+
 // TestCreate_ProjectNotFound: no project matching repo name → error.
 func TestCreate_ProjectNotFound(t *testing.T) {
 	gh := &FakeGitHubClient{

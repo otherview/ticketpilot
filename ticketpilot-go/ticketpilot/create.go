@@ -53,7 +53,7 @@ func (tp *TicketPilot) Create(
 
 	var project *gh.ProjectV2
 	for _, p := range projects {
-		if p.GetName() == tp.cfg.repoName {
+		if strings.EqualFold(p.GetName(), tp.cfg.repoName) {
 			project = p
 			break
 		}
